@@ -1,5 +1,6 @@
 """This module holds the base Harvester class and all its subclassess."""
 
+import ast
 import collections
 import json
 import sys
@@ -75,7 +76,7 @@ class Harvester(object):
         """A wrapper around :func:`~radon.cli.tools.iter_filenames`."""
         return iter_filenames(self.paths, self.config.exclude, self.config.ignore)
 
-    def gobble(self, fobj):
+    def gobble(self, fobj, all_classes=None):
         """Subclasses must implement this method to define behavior.
 
         This method is called for every file to analyze. *fobj* is the file
@@ -89,6 +90,10 @@ class Harvester(object):
         :meth:`gobble` method. Results are yielded as tuple:
         ``(filename, analysis_results)``.
         """
+        all_class_visitor = AllClassesVisitor()
+        for name in self._iter_filenames():
+            with _open(name) as fobj:
+                all_class_visitor.visit(ast.parse(fobj.read()))
         for name in self._iter_filenames():
             with _open(name) as fobj:
                 try:
@@ -117,7 +122,7 @@ class Harvester(object):
                                     )
                                     cellid += 1
                     else:
-                        yield (name, self.gobble(fobj))
+                        yield (name, self.gobble(fobj, all_class_visitor))
                 except Exception as e:
                     yield (name, {"error": str(e)})
 
@@ -436,13 +441,13 @@ def hal_report_to_terminal(report, base_indent=0):
 
 
 import json
-from radon.visitors import analyze_lcom
+from radon.visitors import AllClassesVisitor, analyze_lcom
 
 
 class LCOMHarvester(Harvester):
     """A class that analyzes Python modules to compute the Lack of Cohesion in Methods (LCOM) metric."""
 
-    def gobble(self, fobj):
+    def gobble(self, fobj, all_classes=None):
         """Analyze the content of the file object to compute LCOM."""
         source_code = fobj.read()
         try:
@@ -473,11 +478,11 @@ from radon.visitors import analyze_cbo
 class CBOHarvester(Harvester):
     """A harvester that computes the Coupling Between Object classes (CBO) metric."""
 
-    def gobble(self, fobj):
+    def gobble(self, fobj, all_classes=None):
         """Analyze the content of the file object to compute CBO."""
         source_code = fobj.read()
         try:
-            cbo_results = analyze_cbo(source_code)
+            cbo_results = analyze_cbo(source_code, all_classes)
             return cbo_results
         except Exception as e:
             return {"error": str(e)}

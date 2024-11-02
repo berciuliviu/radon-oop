@@ -5,6 +5,7 @@ HalsteadVisitor, that counts Halstead metrics."""
 import ast
 import collections
 import operator
+import pprint
 
 # Helper functions to use in combination with map()
 GET_COMPLEXITY = operator.attrgetter("complexity")
@@ -463,6 +464,15 @@ class HalsteadVisitor(CodeVisitor):
 import ast
 
 
+class AllClassesVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.classes = []
+
+    def visit_ClassDef(self, node):
+        self.classes.append(node.name)
+        self.generic_visit(node)
+
+
 class LCOMVisitor(ast.NodeVisitor):
     def __init__(self):
         super().__init__()
@@ -494,7 +504,7 @@ class LCOMVisitor(ast.NodeVisitor):
 
         P = 0
         Q = 0
-        print(method_fields)
+
         for i in range(num_methods):
             for j in range(i + 1, num_methods):
                 fields_i = method_fields[methods[i]]
@@ -534,103 +544,167 @@ def analyze_lcom(source_code):
 
 
 import ast
-
-
-import ast
-
-import pprint
+import builtins
 
 
 class CBOVisitor(ast.NodeVisitor):
-    def __init__(self):
-        self.class_couplings = {}
-        self.current_class = None
+    """
+    AST Visitor that computes the Coupling Between Object classes (CBO)
+    metric for classes in Python code, resolving import names.
+    """
+
+    def __init__(self, all_classes):
+        super().__init__()
+        self.class_couplings = {}  # {class_name: set of coupled class names}
+        self.current_class = None  # Name of the class currently being visited
+        self.classes = set(all_classes)  # Set of all class names defined in the code
+        self.imported_names = {}  # Mapping of imported names to their full paths
+        self.standard_lib_classes = self.get_standard_lib_classes()
+        self.self_attributes = {}  # {class_name: {attribute_name: class_name}}
+
+    def get_standard_lib_classes(self):
+        # Get a set of built-in class names
+        classes = {
+            name for name in dir(builtins) if isinstance(getattr(builtins, name), type)
+        }
+
+        classes.remove("super")
+        return classes
+
+    def visit_Module(self, node):
+        # Collect all class names defined in the module and process imports
+        for body_item in node.body:
+            if isinstance(body_item, ast.ClassDef):
+                self.classes.add(body_item.name)
+            elif isinstance(body_item, (ast.Import, ast.ImportFrom)):
+                self.visit(body_item)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            name = alias.name  # e.g., 'json'
+            asname = alias.asname or alias.name  # e.g., 'json'
+            self.imported_names[asname] = name  # {'json': 'json'}
+
+    def visit_ImportFrom(self, node):
+        module = node.module  # e.g., 'os.path'
+        for alias in node.names:
+            name = alias.name  # e.g., 'join'
+            asname = alias.asname or alias.name  # e.g., 'join'
+            full_name = f"{module}.{name}" if module else name  # 'os.path.join'
+            self.imported_names[asname] = full_name  # {'join': 'os.path.join'}
 
     def visit_ClassDef(self, node):
-        class_name = node.name
-        self.current_class = class_name
-
-        if class_name not in self.class_couplings:
-            self.class_couplings[class_name] = set()
-
-        # InheritsFrom
+        self.current_class = node.name
+        self.class_couplings[self.current_class] = set()
+        self.self_attributes[self.current_class] = {}
+        # Handle InheritsFrom coupling
         for base in node.bases:
-            # pprint.pprint(ast.dump(node))
-            # print(node.bases)
-            base_name = self._get_name(base)
-            print(base_name)
-            if base_name and base_name != class_name:
-                self.class_couplings[class_name].add(base_name)
-
+            base_name = self.get_full_name(base)
+            if self.is_class_name(base_name):
+                self.add_coupling(base_name)
         self.generic_visit(node)
         self.current_class = None
+
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)
 
     def visit_Assign(self, node):
         if self.current_class:
-            # IsDefinedInTermsOf: Check if a class variable is assigned an instance of another class
-            if isinstance(node.value, ast.Call):
-                class_name = self._get_name(node.value.func)
-                if class_name and class_name != self.current_class:
-                    self.class_couplings[self.current_class].add(class_name)
-        self.generic_visit(node)
+            # Handle assignments to self attributes
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and self.is_self(target.value):
+                    attr_name = target.attr
+                    assigned_class = self.get_assigned_class(node.value)
+                    if self.is_class_name(assigned_class):
+                        self.self_attributes[self.current_class][
+                            attr_name
+                        ] = assigned_class
+                        self.add_coupling(assigned_class)
+            self.generic_visit(node)
+        else:
+            self.generic_visit(node)
 
-    def visit_AnnAssign(self, node):
+    def visit_Call(self, node):
         if self.current_class:
-            # IsDefinedInTermsOf with annotated assignments
-            if isinstance(node.value, ast.Call):
-                class_name = self._get_name(node.value.func)
-                if class_name and class_name != self.current_class:
-                    self.class_couplings[self.current_class].add(class_name)
-        self.generic_visit(node)
+            # Handle calls to class constructors and methods
+            func_name = self.get_full_name(node.func)
+            if self.is_class_name(func_name):
+                self.add_coupling(func_name)
+            self.generic_visit(node)
+        else:
+            self.generic_visit(node)
 
-    def _get_name(self, node):
-        print(node.__class__.__name__)
-        if isinstance(node, ast.Name):
-            return node.id
+    def visit_Attribute(self, node):
+        if self.current_class:
+            # Handle accesses to attributes of self attributes
+            if self.is_self_attribute(node.value):
+                attr_class = self.get_self_attribute_class(node.value)
+                if self.is_class_name(attr_class):
+                    self.add_coupling(attr_class)
+            self.generic_visit(node)
+        else:
+            self.generic_visit(node)
+
+    def is_class_name(self, name):
+        # Check if the name starts with a capital letter or is a standard lib class
+        if name is None:
+            return False
+        name_parts = name.split(".")
+        if (len(name_parts)) > 1:
+            name = name_parts[-1]
+
+        return (
+            name
+            and name != self.current_class
+            and (name in self.standard_lib_classes or name in self.classes)
+        )
+
+    def add_coupling(self, class_name):
+        self.class_couplings[self.current_class].add(class_name)
+
+    def is_self(self, node):
+        return isinstance(node, ast.Name) and node.id == "self"
+
+    def is_self_attribute(self, node):
+        return isinstance(node, ast.Attribute) and self.is_self(node.value)
+
+    def get_self_attribute_class(self, node):
+        attr_name = node.attr
+        return self.self_attributes[self.current_class].get(attr_name)
+
+    def get_assigned_class(self, node):
+        # Determine the class being assigned
+        if isinstance(node, ast.Call):
+            func_name = self.get_full_name(node.func)
+            return func_name
+        elif isinstance(node, ast.Name):
+            # Variable assigned, could be a class variable
+            name = self.get_full_name(node)
+            return name
         elif isinstance(node, ast.Attribute):
-            return self._get_full_name(node)
-        elif isinstance(node, ast.Subscript):
-            return self._get_name(node.value)
+            return self.get_full_name(node)
+        return None
+
+    def get_full_name(self, node):
+        # Resolve the full name, including imports
+        if isinstance(node, ast.Name):
+            name = node.id
+            return self.imported_names.get(name, name)
+        elif isinstance(node, ast.Attribute):
+            value = self.get_full_name(node.value)
+            return f"{value}.{node.attr}"
         elif isinstance(node, ast.Call):
-            return self._get_name(node.func)
-        else:
-            return None
-
-    def _get_full_name(self, node):
-        names = []
-        while isinstance(node, ast.Attribute):
-            names.insert(0, node.attr)
-            node = node.value
-        if isinstance(node, ast.Name):
-            names.insert(0, node.id)
-        return ".".join(names)
-
-    def _get_top_level_name(self, node):
-        while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call)):
-            if isinstance(node, ast.Call):
-                node = node.func
-            else:
-                node = node.value
-        if isinstance(node, ast.Name):
-            return node.id
-        else:
-            return None
-
-    def get_cbo(self):
-        cbo = {}
-        for class_name, couplings in self.class_couplings.items():
-            couplings.discard(class_name)
-            print(class_name, couplings)
-            cbo[class_name] = len(couplings)
-        return cbo
+            return self.get_full_name(node.func)
+        return None
 
 
-def analyze_cbo(source_code):
+def analyze_cbo(source_code, all_classes):
     """
     Analyze the CBO metric for all classes in the given source code.
     """
     tree = ast.parse(source_code)
-    visitor = CBOVisitor()
+    visitor = CBOVisitor(all_classes.classes)
     visitor.visit(tree)
     class_cbo = {}
     for class_name, couplings in visitor.class_couplings.items():
