@@ -562,6 +562,22 @@ class CBOVisitor(ast.NodeVisitor):
         self.standard_lib_classes = self.get_standard_lib_classes()
         self.self_attributes = {}  # {class_name: {attribute_name: class_name}}
 
+    def split_couplings_and_leave_only_class_names(self):
+        for class_name, couplings in self.class_couplings.items():
+            self.class_couplings[class_name] = set(
+                [self.get_class_name(coupling) for coupling in couplings]
+            )
+
+    def get_class_name(self, coupling):
+        parts = coupling.split(".")
+
+        if len(parts) > 1:
+            for part in parts:
+                if self.is_class_name(part):
+                    return part
+
+        return coupling
+
     def get_standard_lib_classes(self):
         # Get a set of built-in class names
         classes = {
@@ -651,8 +667,21 @@ class CBOVisitor(ast.NodeVisitor):
         if name is None:
             return False
         name_parts = name.split(".")
+
         if (len(name_parts)) > 1:
-            name = name_parts[-1]
+            is_class = False
+            for name_part in name_parts:
+                is_class = (
+                    name_part
+                    and name_part != self.current_class
+                    and (
+                        name_part in self.standard_lib_classes
+                        or name_part in self.classes
+                    )
+                )
+
+                if is_class:
+                    return True
 
         return (
             name
@@ -706,6 +735,7 @@ def analyze_cbo(source_code, all_classes):
     tree = ast.parse(source_code)
     visitor = CBOVisitor(all_classes.classes)
     visitor.visit(tree)
+    visitor.split_couplings_and_leave_only_class_names()
     class_cbo = {}
     for class_name, couplings in visitor.class_couplings.items():
         # The CBO value is the number of unique classes the class is coupled to
