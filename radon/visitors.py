@@ -623,6 +623,17 @@ class CBOVisitor(ast.NodeVisitor):
         self.current_class = None
 
     def visit_FunctionDef(self, node):
+        if self.current_class:
+            # # Handle parameters and return type annotations
+            for arg in node.args.args:
+                if arg.annotation:
+                    type_name = self.get_full_name(arg.annotation)
+                    if self.is_class_name(type_name):
+                        self.add_coupling(type_name)
+            if node.returns:
+                return_type = self.get_full_name(node.returns)
+                if self.is_class_name(return_type):
+                    self.add_coupling(return_type)
         self.generic_visit(node)
 
     def visit_Assign(self, node):
@@ -639,6 +650,27 @@ class CBOVisitor(ast.NodeVisitor):
                         self.add_coupling(assigned_class)
             self.generic_visit(node)
         else:
+            self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        if self.current_class:
+            # Handle annotated assignments (variable annotations)
+            if isinstance(node.target, ast.Attribute) and self.is_self(
+                node.target.value
+            ):
+                # self attribute annotation
+                attr_name = node.target.attr
+                assigned_class = self.get_full_name(node.annotation)
+                if assigned_class:
+                    self.self_attributes[self.current_class][attr_name] = assigned_class
+                    if self.is_class_name(assigned_class):
+                        self.add_coupling(assigned_class)
+            elif isinstance(node.target, ast.Name):
+                # Class variable annotation
+                var_name = node.target.id
+                assigned_class = self.get_full_name(node.annotation)
+                if assigned_class and self.is_class_name(assigned_class):
+                    self.add_coupling(assigned_class)
             self.generic_visit(node)
 
     def visit_Call(self, node):
@@ -720,6 +752,9 @@ class CBOVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Name):
             name = node.id
             return self.imported_names.get(name, name)
+        elif isinstance(node, ast.Subscript):
+            # Handle subscripted types (e.g., List[int])
+            return self.get_full_name(node.value)
         elif isinstance(node, ast.Attribute):
             value = self.get_full_name(node.value)
             return f"{value}.{node.attr}"
